@@ -21,7 +21,7 @@ resource "aws_subnet" "public_subnets" {
     map_public_ip_on_launch = true
     tags = {
         Name = "${var.name}-eks_worker_subnet${count.index + 1}"
-        "kubernetes.io/cluster/${aws_eks_cluster.eks_cluster.name}" = "shared"
+        "kubernetes.io/cluster/${var.name}-eks" = "shared"
         "kubernetes.io/role/elb" = 1
     }
 }
@@ -46,18 +46,4 @@ resource "aws_route_table_association" "WorkerSubnet1RouteTableAssociations" {
 
     subnet_id      = aws_subnet.public_subnets[count.index].id
     route_table_id = aws_route_table.eks_worker_subnet_routingtable.id
-}
-
-resource "aws_subnet" "private_subnets" {
-    count = length(var.private_subnet_cidrs)
-
-    availability_zone       = data.aws_availability_zones.available.names[count.index]
-    cidr_block              = var.private_subnet_cidrs[count.index]
-    vpc_id                  = aws_vpc.eks.id
-    map_public_ip_on_launch = false
-    tags = {
-        Name = "${var.name}-private_subnet${count.index + 1}"
-        "kubernetes.io/cluster/${aws_eks_cluster.eks_cluster.name}" = "shared"
-        "kubernetes.io/role/internal-elb" = 1
-    }
 }
