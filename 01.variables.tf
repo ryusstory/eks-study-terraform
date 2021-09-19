@@ -31,14 +31,17 @@ variable "private_subnet_cidrs" {
     ]
 }
 
+variable "home_cidr" {
+    # 접근할 집 주소 등 설정
+    type = string
+}
+
 variable "eks_bastion_host" {
     # bastion 호스트 관련 설정 vpc_cidr의 대역 내에서 private_ip 설정 필요
-    # remote_public_ip는 접근할 집 주소 등 설정
     type = map
     default = {
         instance_type    = "t3.small"
         private_ip       = "192.168.0.100"
-        remote_public_ip = "0.0.0.0/32"
     }
 }
 

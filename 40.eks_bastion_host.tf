@@ -71,7 +71,7 @@ resource "aws_security_group" "eks_bastion_host" {
         from_port        = 0
         to_port          = 0
         protocol         = "-1"
-        cidr_blocks      = [aws_vpc.eks.cidr_block, var.eks_bastion_host["remote_public_ip"]]
+        cidr_blocks      = [aws_vpc.eks.cidr_block, var.home_cidr]
     }
 
     egress {
@@ -117,14 +117,6 @@ resource "aws_instance" "eks_bastion_host" {
         # Install tools
         yum -y install git tree tmux jq lynx htop
 
-        # Install aws cli v2
-        curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
-        unzip awscliv2.zip
-        sudo ./aws/install
-        export PATH=/usr/local/bin:$PATH
-        source ~/.bash_profile
-        complete -C '/usr/local/bin/aws_completer' aws
-
         # Install eksctl
         curl --silent --location "https://github.com/weaveworks/eksctl/releases/latest/download/eksctl_$(uname -s)_amd64.tar.gz" | tar xz -C /tmp
         mv /tmp/eksctl /usr/local/bin
@@ -133,20 +125,12 @@ resource "aws_instance" "eks_bastion_host" {
         curl -LO https://dl.k8s.io/release/v1.21.2/bin/linux/amd64/kubectl
         install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
 
-        # Install postgresql11
-        amazon-linux-extras install -y postgresql11
-
         # Install the full Amazon Corretto 11
         yum install java-11-amazon-corretto -y
 
         # Install Docker
         amazon-linux-extras install docker -y
         systemctl start docker && systemctl enable docker
-
-        # Install nodejs
-        yum install -y gcc-c++ make
-        curl -sL https://rpm.nodesource.com/setup_14.x | sudo -E bash -
-        yum install -y nodejs
 
         # Source bash-completion for kubectl
         source <(kubectl completion bash)
@@ -175,52 +159,42 @@ resource "aws_instance" "eks_bastion_host" {
         echo "${tls_private_key.eks_keypair.private_key_pem}" >> /root/.ssh/id_rsa
         chmod 400 /root/.ssh/id_rsa
 
+        curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/master/scripts/get-helm-3
+        chmod 700 get_helm.sh
+        /get_helm.sh
+
+        cat <<\EOT > /set_worker_node.sh
+        #!/bin/bash
         WORKER_NODES=($(aws ec2 describe-instances --region ap-northeast-2 --filters "Name=tag:eks:nodegroup-name,Values=k8s-eks_nodegroup" --query "Reservations[*].Instances[*].PrivateIpAddress" --output text))
-        for ((worker=0; worker<$${#WORKER_NODES[@]}; worker++)); do
-            # alias w$(echo $worker+1 | bc)="ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ec2-user@$${WORKER_NODES[$worker]}"
-            echo "ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ec2-user@$${WORKER_NODES[$worker]}" > /usr/local/bin/w$(echo $worker+1 | bc)
-            chmod +x /usr/local/bin/w$(echo $worker+1 | bc)
-        done;
+        if [ -z "$WORKER_NODES" ]; then 
+            echo "no WORKER_NODES"
+        else 
+            echo "WORKER_NODES exists"
+            for ((worker=0; worker<$${#WORKER_NODES[@]}; worker++)); do
+                echo "ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ec2-user@$${WORKER_NODES[$worker]}" > /usr/local/bin/w$(echo $worker+1 | bc)
+                chmod +x /usr/local/bin/w$(echo $worker+1 | bc)
+            done;
+        fi
+        EOT
+        chmod +x /set_worker_node.sh
+        /set_worker_node.sh
+        aws eks update-kubeconfig --name k8s-eks
     EOF
-}
-
-
-data "aws_security_group" "nodegroup_remote_access" {
-    filter {
-        name   = "group-name"
-        values = ["eks-cluster-sg-${var.name}-eks-*"]
-    }
-
-    filter {
-        name   = "vpc-id"
-        values = [aws_vpc.eks.id]
-    }
-    depends_on = [
-        aws_eks_node_group.eks_nodegroup
-    ]
-}
-
-resource "aws_security_group_rule" "nodegroup_remote_access" {
-    type              = "ingress"
-    from_port         = 0
-    to_port           = 0
-    protocol          = "-1"
-    security_group_id = data.aws_security_group.nodegroup_remote_access.id
-    source_security_group_id = aws_security_group.eks_bastion_host.id
 }
 
 resource "local_file" "kubectl_permission_to_ec2_iam_role" {
     content  = yamlencode({
-        "apiVersion": "v1",
         "data": {
-            "mapRoles": "- groups:\n  - system:bootstrappers\n  - system:nodes\n  rolearn: ${aws_iam_role.eks_nodegroup_role.arn}\n  username: system:node:{{EC2PrivateDNSName}}\n- rolearn: ${aws_iam_role.eks_bastion_host.arn}\n  username: ${aws_iam_role.eks_bastion_host.name}\n  groups:\n    - system:masters\n"
-        },
-        "kind": "ConfigMap",    
-        "metadata": {
-            "name": "aws-auth",
-            "namespace": "kube-system"
+            "mapRoles": "- rolearn: ${aws_iam_role.eks_bastion_host.arn}\n  username: ${aws_iam_role.eks_bastion_host.name}\n  groups:\n    - system:masters\n"
         },
     })
 
     filename = "./outputs/configmap.yaml"
+}
+output "edit_configmap_for_bastion_host" {
+    value = "kubectl edit -n kube-system configmap/aws-auth"
+}
+
+output "bastion_host_ssh_command" {
+    value = "ssh -i ${local_file.eks_keypair.filename} ec2-user@${aws_instance.eks_bastion_host.public_ip}"
 }
